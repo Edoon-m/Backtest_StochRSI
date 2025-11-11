@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 st.set_page_config(page_title="StochRSI Backtest", layout="wide")
 
 def stoch_rsi(close, rsi_len=14, stoch_len=14, k=3, d=3):
+    close = pd.Series(close.squeeze())   # 🔥 fix: squeeze() macht 1D
     delta = close.diff()
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
@@ -20,7 +21,6 @@ def stoch_rsi(close, rsi_len=14, stoch_len=14, k=3, d=3):
     k_line = srs.rolling(k).mean() * 100
     d_line = k_line.rolling(d).mean()
     return pd.DataFrame({"K": k_line, "D": d_line})
-
 def run_backtest(df):
     df["bull_cross"] = (df["K"].shift(1) < df["D"].shift(1)) & (df["K"] > df["D"])
     df["bear_cross"] = (df["K"].shift(1) > df["D"].shift(1)) & (df["K"] < df["D"])
