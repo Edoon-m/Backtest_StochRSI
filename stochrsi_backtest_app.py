@@ -6,38 +6,54 @@ import matplotlib.pyplot as plt
 
 st.set_page_config(page_title="StochRSI Backtest", layout="wide")
 
+# ---------- Indicator ----------
 def stoch_rsi(close, rsi_len=14, stoch_len=14, k=3, d=3):
-    close = pd.Series(close.squeeze())   # 🔥 fix: squeeze() macht 1D
+    # close garantiert 1D und mit sauberem Index
+    close = pd.Series(close.squeeze(), index=close.index)
     delta = close.diff()
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
-    roll_up = pd.Series(gain, index=close.index).rolling(rsi_len).mean()
+    roll_up   = pd.Series(gain, index=close.index).rolling(rsi_len).mean()
     roll_down = pd.Series(loss, index=close.index).rolling(rsi_len).mean()
-    rs = roll_up / (roll_down + 1e-12)
+    rs  = roll_up / (roll_down + 1e-12)
     rsi = 100 - (100 / (1 + rs))
+
     rsi_min = rsi.rolling(stoch_len).min()
     rsi_max = rsi.rolling(stoch_len).max()
-    srs = (rsi - rsi_min) / (rsi_max - rsi_min + 1e-12)
+    srs   = (rsi - rsi_min) / (rsi_max - rsi_min + 1e-12)
     k_line = srs.rolling(k).mean() * 100
     d_line = k_line.rolling(d).mean()
-    return pd.DataFrame({"K": k_line, "D": d_line})
+    return pd.DataFrame({"K": k_line, "D": d_line}, index=close.index)
+
+# ---------- Backtest ----------
 def run_backtest(df):
     df["bull_cross"] = (df["K"].shift(1) < df["D"].shift(1)) & (df["K"] > df["D"])
     df["bear_cross"] = (df["K"].shift(1) > df["D"].shift(1)) & (df["K"] < df["D"])
+    # nur Extremzonen (reduziert Fehlsignale)
     df["bull_cross"] &= (df["K"].shift(1) < 20)
     df["bear_cross"] &= (df["K"].shift(1) > 80)
-    cash, position = 10000, 0
+
+    cash, position = 10000.0, 0.0
     trades = []
+
     for i in range(len(df)):
-        row = df.iloc[i]; price = row["close"]
+        row = df.iloc[i]
+        price = float(row["close"])
+
         if row["bull_cross"] and cash > 0:
-            position = cash / price; cash = 0; trades.append(("BUY", row.name, price))
+            position = cash / price
+            cash = 0.0
+            trades.append(("BUY", row.name, price))
         elif row["bear_cross"] and position > 0:
-            cash = position * price; position = 0; trades.append(("SELL", row.name, price))
-    final_value = cash + position * df["close"].iloc[-1]
-    perf = (final_value / 10000 - 1) * 100
+            cash = position * price
+            position = 0.0
+            trades.append(("SELL", row.name, price))
+
+    final_value = cash + position * float(df["close"].iloc[-1])
+    perf = (final_value / 10000.0 - 1.0) * 100.0
     return final_value, perf, trades
 
+# ---------- UI ----------
 st.title("📊 StochRSI Backtest Dashboard")
 
 col1, col2, col3 = st.columns(3)
@@ -48,18 +64,30 @@ with col2:
 with col3:
     years = st.slider("Zeitraum (Jahre)", 1, 10, 3)
 
-# Läuft automatisch mit den gewählten Parametern
+# ---------- Run ----------
 try:
-    df = yf.download(symbol, period=f"{years}y", interval=interval)
+    # yfinance lädt bei Intraday nur begrenzte Historie -> period anpassen
+    period = f"{years}y"
+    if interval in ("1h", "4h"):
+        period = "730d" if interval == "4h" else "60d"
+
+    df = yf.download(symbol, period=period, interval=interval)
     df = df.rename(columns=str.lower).dropna()
+
+    # nur Close & sauberer Zeitindex (ohne TZ), vermeidet MultiIndex-Probleme
+    df = df[["close"]].copy()
+    df.index = pd.to_datetime(df.index).tz_localize(None)
+
     if df.empty:
         st.warning("Keine Daten geladen. Versuch ein anderes Symbol/Intervall.")
     else:
         stoch = stoch_rsi(df["close"])
-        df = df.join(stoch).dropna()
+        # WICHTIG: concat statt join, gleicher Index
+        df = pd.concat([df, stoch], axis=1).dropna()
+
         final_value, perf, trades = run_backtest(df)
 
-        fig, ax = plt.subplots(figsize=(12,5))
+        fig, ax = plt.subplots(figsize=(12, 5))
         ax.plot(df.index, df["close"], label="Kurs")
         ax.scatter(df.index[df["bull_cross"]], df["close"][df["bull_cross"]], label="Buy", marker="^")
         ax.scatter(df.index[df["bear_cross"]], df["close"][df["bear_cross"]], label="Sell", marker="v")
