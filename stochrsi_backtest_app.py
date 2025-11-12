@@ -8,8 +8,7 @@ st.set_page_config(page_title="StochRSI Backtest", layout="wide")
 
 # ---------- Indicator ----------
 def stoch_rsi(close, rsi_len=14, stoch_len=14, k=3, d=3):
-    # close garantiert 1D und mit sauberem Index
-    close = pd.Series(close.squeeze(), index=close.index)
+    close = pd.Series(close.squeeze(), index=close.index)  # 1D-Serie sicherstellen
     delta = close.diff()
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
@@ -29,17 +28,15 @@ def stoch_rsi(close, rsi_len=14, stoch_len=14, k=3, d=3):
 def run_backtest(df):
     df["bull_cross"] = (df["K"].shift(1) < df["D"].shift(1)) & (df["K"] > df["D"])
     df["bear_cross"] = (df["K"].shift(1) > df["D"].shift(1)) & (df["K"] < df["D"])
-    # nur Extremzonen (reduziert Fehlsignale)
+    # Fehlsignale reduzieren: nur in Extremzonen werten
     df["bull_cross"] &= (df["K"].shift(1) < 20)
     df["bear_cross"] &= (df["K"].shift(1) > 80)
 
     cash, position = 10000.0, 0.0
     trades = []
-
     for i in range(len(df)):
         row = df.iloc[i]
         price = float(row["close"])
-
         if row["bull_cross"] and cash > 0:
             position = cash / price
             cash = 0.0
@@ -55,7 +52,6 @@ def run_backtest(df):
 
 # ---------- UI ----------
 st.title("📊 StochRSI Backtest Dashboard")
-
 col1, col2, col3 = st.columns(3)
 with col1:
     symbol = st.text_input("Symbol (z. B. BTC-USD, ETH-USD, AAPL)", "BTC-USD")
@@ -66,24 +62,37 @@ with col3:
 
 # ---------- Run ----------
 try:
-    # yfinance lädt bei Intraday nur begrenzte Historie -> period anpassen
+    # yfinance-Perioden für Intraday begrenzt
     period = f"{years}y"
     if interval in ("1h", "4h"):
         period = "730d" if interval == "4h" else "60d"
 
-    df = yf.download(symbol, period=period, interval=interval)
-    df = df.rename(columns=str.lower).dropna()
-
-    # nur Close & sauberer Zeitindex (ohne TZ), vermeidet MultiIndex-Probleme
-    df = df[["close"]].copy()
-    df.index = pd.to_datetime(df.index).tz_localize(None)
-
-    if df.empty:
+    df = yf.download(symbol, period=period, interval=interval, group_by="column")
+    if df is None or df.empty:
         st.warning("Keine Daten geladen. Versuch ein anderes Symbol/Intervall.")
     else:
+        # --- MultiIndex-Spalten flach machen (wichtig!) ---
+        if isinstance(df.columns, pd.MultiIndex):
+            # Bei Einzelticker: unterste Ebene ("Close" etc.) nehmen
+            df.columns = df.columns.get_level_values(-1)
+
+        df = df.rename(columns=str.lower)
+        # Nur Close verwenden und Index säubern
+        df = df[["close"]].copy()
+        # yfinance liefert manchmal TZ → entfernen
+        if getattr(df.index, "tz", None) is not None:
+            df.index = df.index.tz_convert(None)
+        df.index = pd.to_datetime(df.index).tz_localize(None)
+
+        # Falls der Index wider Erwarten MultiIndex ist → flach ziehen
+        if isinstance(df.index, pd.MultiIndex):
+            df = df.reset_index(level=list(range(df.index.nlevels-1))).droplevel(0, axis=1)  # Sicherheitsnetz
+            df.index = pd.to_datetime(df.index).tz_localize(None)
+
+        # Indikator berechnen & robust zusammenführen
         stoch = stoch_rsi(df["close"])
-        # WICHTIG: concat statt join, gleicher Index
-        df = pd.concat([df, stoch], axis=1).dropna()
+        df = pd.concat([df, stoch], axis=1)
+        df = df.dropna()
 
         final_value, perf, trades = run_backtest(df)
 
@@ -101,5 +110,6 @@ try:
             st.dataframe(trade_df)
         else:
             st.info("Keine Signale im gewählten Zeitraum.")
+
 except Exception as e:
     st.error(f"Fehler: {e}")
