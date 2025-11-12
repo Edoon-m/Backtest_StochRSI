@@ -6,12 +6,44 @@ import matplotlib.pyplot as plt
 
 st.set_page_config(page_title="StochRSI Backtest", layout="wide")
 
-# ---------- Indicator ----------
+# -------- Helpers --------
+def pick_close(df: pd.DataFrame) -> pd.Series:
+    """Hole die Close-Spalte robust (egal ob 'Close'/'close', MultiIndex, etc.)."""
+    if df is None or df.empty:
+        return pd.Series(dtype=float)
+
+    # MultiIndex-Spalten flach ziehen (bei Einzelticker holen wir die unterste Ebene)
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(-1)
+
+    # Case-insensitive Mapping
+    cols = list(map(str, df.columns))
+    lower_map = {c.lower(): c for c in cols}
+    if "close" in lower_map:
+        col = lower_map["close"]
+        ser = df[col]
+    else:
+        # Fallback: Wenn nur eine Spalte vorhanden ist (z.B. bereits Close)
+        if df.shape[1] == 1:
+            ser = df.iloc[:, 0]
+        else:
+            raise KeyError("Keine 'close'-Spalte gefunden.")
+
+    # Sicherstellen: 1D-Serie, sauberer Zeitindex ohne TZ
+    ser = pd.Series(ser.squeeze(), index=df.index)
+    if getattr(ser.index, "tz", None) is not None:
+        ser.index = ser.index.tz_convert(None)
+    ser.index = pd.to_datetime(ser.index).tz_localize(None)
+    ser.name = "close"
+    return ser.astype(float)
+
+# -------- Indicator --------
 def stoch_rsi(close, rsi_len=14, stoch_len=14, k=3, d=3):
-    close = pd.Series(close.squeeze(), index=close.index)  # 1D-Serie sicherstellen
+    close = pd.Series(close.squeeze(), index=close.index)
     delta = close.diff()
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
+
     roll_up   = pd.Series(gain, index=close.index).rolling(rsi_len).mean()
     roll_down = pd.Series(loss, index=close.index).rolling(rsi_len).mean()
     rs  = roll_up / (roll_down + 1e-12)
@@ -20,15 +52,17 @@ def stoch_rsi(close, rsi_len=14, stoch_len=14, k=3, d=3):
     rsi_min = rsi.rolling(stoch_len).min()
     rsi_max = rsi.rolling(stoch_len).max()
     srs   = (rsi - rsi_min) / (rsi_max - rsi_min + 1e-12)
+
     k_line = srs.rolling(k).mean() * 100
     d_line = k_line.rolling(d).mean()
-    return pd.DataFrame({"K": k_line, "D": d_line}, index=close.index)
+    out = pd.DataFrame({"K": k_line, "D": d_line}, index=close.index)
+    return out.dropna()
 
-# ---------- Backtest ----------
+# -------- Backtest --------
 def run_backtest(df):
     df["bull_cross"] = (df["K"].shift(1) < df["D"].shift(1)) & (df["K"] > df["D"])
     df["bear_cross"] = (df["K"].shift(1) > df["D"].shift(1)) & (df["K"] < df["D"])
-    # Fehlsignale reduzieren: nur in Extremzonen werten
+    # Extremzonen-Filter reduziert Fehlsignale
     df["bull_cross"] &= (df["K"].shift(1) < 20)
     df["bear_cross"] &= (df["K"].shift(1) > 80)
 
@@ -50,7 +84,7 @@ def run_backtest(df):
     perf = (final_value / 10000.0 - 1.0) * 100.0
     return final_value, perf, trades
 
-# ---------- UI ----------
+# -------- UI --------
 st.title("📊 StochRSI Backtest Dashboard")
 col1, col2, col3 = st.columns(3)
 with col1:
@@ -60,39 +94,22 @@ with col2:
 with col3:
     years = st.slider("Zeitraum (Jahre)", 1, 10, 3)
 
-# ---------- Run ----------
+# -------- Run --------
 try:
-    # yfinance-Perioden für Intraday begrenzt
+    # yfinance-Periodenlimits für Intraday beachten
     period = f"{years}y"
     if interval in ("1h", "4h"):
-        period = "730d" if interval == "4h" else "60d"
+        period = "60d" if interval == "1h" else "730d"
 
-    df = yf.download(symbol, period=period, interval=interval, group_by="column")
-    if df is None or df.empty:
+    df_raw = yf.download(symbol, period=period, interval=interval, group_by="column")
+    if df_raw is None or df_raw.empty:
         st.warning("Keine Daten geladen. Versuch ein anderes Symbol/Intervall.")
     else:
-        # --- MultiIndex-Spalten flach machen (wichtig!) ---
-        if isinstance(df.columns, pd.MultiIndex):
-            # Bei Einzelticker: unterste Ebene ("Close" etc.) nehmen
-            df.columns = df.columns.get_level_values(-1)
+        close = pick_close(df_raw)
+        df = pd.DataFrame({"close": close})
 
-        df = df.rename(columns=str.lower)
-        # Nur Close verwenden und Index säubern
-        df = df[["close"]].copy()
-        # yfinance liefert manchmal TZ → entfernen
-        if getattr(df.index, "tz", None) is not None:
-            df.index = df.index.tz_convert(None)
-        df.index = pd.to_datetime(df.index).tz_localize(None)
-
-        # Falls der Index wider Erwarten MultiIndex ist → flach ziehen
-        if isinstance(df.index, pd.MultiIndex):
-            df = df.reset_index(level=list(range(df.index.nlevels-1))).droplevel(0, axis=1)  # Sicherheitsnetz
-            df.index = pd.to_datetime(df.index).tz_localize(None)
-
-        # Indikator berechnen & robust zusammenführen
         stoch = stoch_rsi(df["close"])
-        df = pd.concat([df, stoch], axis=1)
-        df = df.dropna()
+        df = pd.concat([df, stoch], axis=1).dropna()
 
         final_value, perf, trades = run_backtest(df)
 
