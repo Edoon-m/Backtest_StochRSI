@@ -7,39 +7,50 @@ import matplotlib.pyplot as plt
 st.set_page_config(page_title="StochRSI Backtest", layout="wide")
 
 # -------- Helpers --------
+def flatten_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Flache Spalten (auch MultiIndex) zu einfachen Strings ab."""
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = ["_".join([str(x) for x in tup if x is not None]).strip() for tup in df.columns.values]
+    else:
+        df.columns = df.columns.astype(str)
+    return df
+
 def pick_close(df: pd.DataFrame) -> pd.Series:
-    """Hole die Close-Spalte robust (egal ob 'Close'/'close', MultiIndex, etc.)."""
+    """Hole die Close-Spalte robust (egal ob 'Close', 'Adj Close', MultiIndex, etc.)."""
     if df is None or df.empty:
         return pd.Series(dtype=float)
 
-    # MultiIndex-Spalten flach ziehen (bei Einzelticker holen wir die unterste Ebene)
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(-1)
+    df = flatten_columns(df)
 
-    # Case-insensitive Mapping
-    cols = list(map(str, df.columns))
-    lower_map = {c.lower(): c for c in cols}
+    # Case-insensitive exakte Treffer zuerst
+    lower_map = {c.lower(): c for c in df.columns}
     if "close" in lower_map:
         col = lower_map["close"]
-        ser = df[col]
+    elif "adj close" in lower_map:
+        col = lower_map["adj close"]
     else:
-        # Fallback: Wenn nur eine Spalte vorhanden ist (z.B. bereits Close)
-        if df.shape[1] == 1:
-            ser = df.iloc[:, 0]
+        # Fallback: erste Spalte, die 'close' enthält
+        cand = [c for c in df.columns if "close" in c.lower()]
+        if cand:
+            col = cand[0]
         else:
-            raise KeyError("Keine 'close'-Spalte gefunden.")
+            # Wenn nur eine Spalte existiert, nimm diese
+            if df.shape[1] == 1:
+                col = df.columns[0]
+            else:
+                raise KeyError(f"Keine 'close'-Spalte gefunden. Spalten: {list(df.columns)}")
 
-    # Sicherstellen: 1D-Serie, sauberer Zeitindex ohne TZ
-    ser = pd.Series(ser.squeeze(), index=df.index)
+    ser = df[col]
+    # 1D sicherstellen & Zeitindex normalisieren
+    ser = pd.Series(ser.squeeze(), index=df.index, name="close")
     if getattr(ser.index, "tz", None) is not None:
         ser.index = ser.index.tz_convert(None)
     ser.index = pd.to_datetime(ser.index).tz_localize(None)
-    ser.name = "close"
     return ser.astype(float)
 
 # -------- Indicator --------
 def stoch_rsi(close, rsi_len=14, stoch_len=14, k=3, d=3):
-    close = pd.Series(close.squeeze(), index=close.index)
+    close = pd.Series(close.squeeze(), index=close.index, name="close")
     delta = close.diff()
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
@@ -62,7 +73,7 @@ def stoch_rsi(close, rsi_len=14, stoch_len=14, k=3, d=3):
 def run_backtest(df):
     df["bull_cross"] = (df["K"].shift(1) < df["D"].shift(1)) & (df["K"] > df["D"])
     df["bear_cross"] = (df["K"].shift(1) > df["D"].shift(1)) & (df["K"] < df["D"])
-    # Extremzonen-Filter reduziert Fehlsignale
+    # Extremzonen-Filter (empfohlen)
     df["bull_cross"] &= (df["K"].shift(1) < 20)
     df["bear_cross"] &= (df["K"].shift(1) > 80)
 
@@ -105,7 +116,7 @@ try:
     if df_raw is None or df_raw.empty:
         st.warning("Keine Daten geladen. Versuch ein anderes Symbol/Intervall.")
     else:
-        close = pick_close(df_raw)
+        close = pick_close(df_raw)      # << robustes Close
         df = pd.DataFrame({"close": close})
 
         stoch = stoch_rsi(df["close"])
@@ -127,6 +138,5 @@ try:
             st.dataframe(trade_df)
         else:
             st.info("Keine Signale im gewählten Zeitraum.")
-
 except Exception as e:
     st.error(f"Fehler: {e}")
