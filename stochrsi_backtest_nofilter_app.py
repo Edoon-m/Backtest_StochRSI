@@ -7,20 +7,13 @@ import matplotlib.pyplot as plt
 st.set_page_config(page_title="StochRSI Cross Signale", layout="wide")
 
 # ---------------------------------------------------------
-# 🔥 TradingView-RSI (Wilder) & StochRSI (TV-kompatibel)
+# TradingView Wilder RSI + StochRSI
 # ---------------------------------------------------------
 
 def rma(series: pd.Series, length: int) -> pd.Series:
-    """Wilder's Moving Average (wie TradingView für RSI)."""
     return series.ewm(alpha=1/length, adjust=False).mean()
 
 def stoch_rsi_tv_like(close, rsi_len=14, stoch_len=14, k=3, d=3):
-    """
-    StochRSI identisch zu TradingView:
-    1) Wilder RSI
-    2) Stochastic über RSI
-    3) K & D geglättet mit einfachen SMA
-    """
     close = pd.Series(close).astype(float)
     delta = close.diff()
 
@@ -35,7 +28,6 @@ def stoch_rsi_tv_like(close, rsi_len=14, stoch_len=14, k=3, d=3):
 
     lowest_rsi = rsi.rolling(stoch_len).min()
     highest_rsi = rsi.rolling(stoch_len).max()
-
     stoch = (rsi - lowest_rsi) / (highest_rsi - lowest_rsi + 1e-12) * 100
 
     k_line = stoch.rolling(k).mean()
@@ -44,17 +36,16 @@ def stoch_rsi_tv_like(close, rsi_len=14, stoch_len=14, k=3, d=3):
     return pd.DataFrame({"K": k_line, "D": d_line}).dropna()
 
 # ---------------------------------------------------------
-# Cross-Berechnung (immer bei Schnitt)
+# Cross Signale
 # ---------------------------------------------------------
 
 def find_cross_signals(df):
-    """Buy = K kreuzt D von unten. Sell = K kreuzt D von oben."""
     df["bull_cross"] = (df["K"].shift(1) < df["D"].shift(1)) & (df["K"] > df["D"])
     df["bear_cross"] = (df["K"].shift(1) > df["D"].shift(1)) & (df["K"] < df["D"])
     return df
 
 # ---------------------------------------------------------
-# Backtest (immer Buy/Sell bei jedem Kreuz)
+# Backtest Logik
 # ---------------------------------------------------------
 
 def run_backtest(df):
@@ -80,10 +71,10 @@ def run_backtest(df):
     return final_value, perf, trades
 
 # ---------------------------------------------------------
-# Streamlit UI
+# UI
 # ---------------------------------------------------------
 
-st.title("📊 TradingView-genauer StochRSI – Kauf/Verkauf bei jedem Cross")
+st.title("📊 TradingView-StochRSI – Buy/Sell bei jedem Cross")
 
 col1, col2, col3 = st.columns(3)
 with col1:
@@ -102,19 +93,32 @@ try:
         st.write(df.head())
         st.stop()
 
-    stoch = stoch_rsi_tv_like(df["close"])
+    # ----------------------------------------
+    # FIX: close garantiert 1-dimensional machen
+    # ----------------------------------------
+    close = df["close"]
+    if isinstance(close, pd.DataFrame):
+        close = close.iloc[:, 0]
+    close = close.astype(float).squeeze()
+
+    df["close"] = close
+
+    stoch = stoch_rsi_tv_like(close)
     df = df.join(stoch).dropna()
 
     df = find_cross_signals(df)
 
     final_value, perf, trades = run_backtest(df)
 
+    # Plot
     fig, ax = plt.subplots(figsize=(12, 5))
     ax.plot(df.index, df["close"], label="Preis")
-    ax.scatter(df.index[df["bull_cross"]], df["close"][df["bull_cross"]], color="green", marker="^", s=80, label="Buy")
-    ax.scatter(df.index[df["bear_cross"]], df["close"][df["bear_cross"]], color="red", marker="v", s=80, label="Sell")
-    ax.legend()
+    ax.scatter(df.index[df["bull_cross"]], df["close"][df["bull_cross"]],
+               color="green", marker="^", s=80, label="Buy")
+    ax.scatter(df.index[df["bear_cross"]], df["close"][df["bear_cross"]],
+               color="red", marker="v", s=80, label="Sell")
     ax.set_title(f"StochRSI Cross Signale – {symbol} ({interval})")
+    ax.legend()
 
     st.pyplot(fig)
 
