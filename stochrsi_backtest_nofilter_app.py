@@ -7,9 +7,17 @@ import matplotlib.pyplot as plt
 st.set_page_config(page_title="StochRSI Cross Signale", layout="wide")
 
 # ---------------------------------------------------------
+# Utility: MultiIndex flach machen
+# ---------------------------------------------------------
+def flatten_columns(df):
+    """Fix für MultiIndex-Spalten."""
+    df.columns = ['_'.join(col).strip() if isinstance(col, tuple) else col for col in df.columns]
+    return df
+
+
+# ---------------------------------------------------------
 # TradingView Wilder RSI + StochRSI
 # ---------------------------------------------------------
-
 def rma(series: pd.Series, length: int) -> pd.Series:
     return series.ewm(alpha=1/length, adjust=False).mean()
 
@@ -35,19 +43,19 @@ def stoch_rsi_tv_like(close, rsi_len=14, stoch_len=14, k=3, d=3):
 
     return pd.DataFrame({"K": k_line, "D": d_line}).dropna()
 
+
 # ---------------------------------------------------------
 # Cross Signale
 # ---------------------------------------------------------
-
 def find_cross_signals(df):
     df["bull_cross"] = (df["K"].shift(1) < df["D"].shift(1)) & (df["K"] > df["D"])
     df["bear_cross"] = (df["K"].shift(1) > df["D"].shift(1)) & (df["K"] < df["D"])
     return df
 
+
 # ---------------------------------------------------------
 # Backtest Logik
 # ---------------------------------------------------------
-
 def run_backtest(df):
     cash = 10000
     position = 0
@@ -67,13 +75,13 @@ def run_backtest(df):
             trades.append(("SELL", df.index[i], price))
 
     final_value = cash + position * df["close"].iloc[-1]
-    perf = (final_value / 10000 - 1) * 100
-    return final_value, perf, trades
+    gain = (final_value / 10000 - 1) * 100
+    return final_value, gain, trades
+
 
 # ---------------------------------------------------------
 # UI
 # ---------------------------------------------------------
-
 st.title("📊 TradingView-StochRSI – Buy/Sell bei jedem Cross")
 
 col1, col2, col3 = st.columns(3)
@@ -84,50 +92,64 @@ with col2:
 with col3:
     years = st.slider("Zeitraum (Jahre)", 1, 10, 3)
 
+
+# ---------------------------------------------------------
+# Hauptlogik
+# ---------------------------------------------------------
 try:
     df = yf.download(symbol, period=f"{years}y", interval=interval)
-    df = df.rename(columns=str.lower).dropna()
 
-    if "close" not in df.columns:
+    # 1) MultiIndex-Spalten fixen
+    df = flatten_columns(df)
+
+    # 2) Close-Spalte finden
+    close_col = None
+    for c in df.columns:
+        if "close" in c.lower():
+            close_col = c
+            break
+
+    if close_col is None:
         st.error("Fehler: Keine 'close'-Spalte gefunden.")
         st.write(df.head())
         st.stop()
 
-    # ----------------------------------------
-    # FIX: close garantiert 1-dimensional machen
-    # ----------------------------------------
-    close = df["close"]
+    # 3) Close 1D erzwingen
+    close = df[close_col]
     if isinstance(close, pd.DataFrame):
         close = close.iloc[:, 0]
     close = close.astype(float).squeeze()
-
     df["close"] = close
 
+    # 4) StochRSI berechnen
     stoch = stoch_rsi_tv_like(close)
-    df = df.join(stoch).dropna()
+    stoch.index = df.index  # <- WICHTIG: Index anpassen (kein Merge-Fehler mehr!)
 
+    # 5) Join sicher
+    df = df.join(stoch, how="inner")
+
+    # 6) Crosses
     df = find_cross_signals(df)
 
+    # 7) Backtest
     final_value, perf, trades = run_backtest(df)
 
-    # Plot
+    # 8) Plot
     fig, ax = plt.subplots(figsize=(12, 5))
-    ax.plot(df.index, df["close"], label="Preis")
+    ax.plot(df.index, df["close"], label="Preis", color="white")
     ax.scatter(df.index[df["bull_cross"]], df["close"][df["bull_cross"]],
-               color="green", marker="^", s=80, label="Buy")
+               marker="^", color="green", s=80, label="Buy")
     ax.scatter(df.index[df["bear_cross"]], df["close"][df["bear_cross"]],
-               color="red", marker="v", s=80, label="Sell")
-    ax.set_title(f"StochRSI Cross Signale – {symbol} ({interval})")
+               marker="v", color="red", s=80, label="Sell")
     ax.legend()
+    ax.set_title(f"{symbol} – StochRSI Cross Signale ({interval})")
 
     st.pyplot(fig)
 
-    st.success(f"💰 Endwert: **{final_value:,.2f} USD**  |  Gewinn: **{perf:.2f}%**")
+    st.success(f"💰 Endwert: **{final_value:,.2f} USD** | Gewinn: **{perf:.2f}%**")
 
     if trades:
         st.dataframe(pd.DataFrame(trades, columns=["Typ", "Datum", "Preis"]).set_index("Datum"))
-    else:
-        st.info("Keine Cross-Signale im Zeitraum.")
 
 except Exception as e:
     st.error(f"Fehler: {e}")
