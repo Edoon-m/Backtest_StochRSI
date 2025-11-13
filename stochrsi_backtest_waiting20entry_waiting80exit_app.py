@@ -8,16 +8,16 @@ st.set_page_config(page_title="Clean StochRSI – Cross Trades", layout="wide")
 
 # ----------------- Hilfsfunktionen -----------------
 
-def rma(x: pd.Series, length: int) -> pd.Series:
+def rma(x, length):
     """Wilder's RMA (wie bei TradingView)."""
     return x.ewm(alpha=1 / length, adjust=False).mean()
 
 
-def stoch_rsi(close: pd.Series,
-              rsi_len: int = 14,
-              stoch_len: int = 14,
-              smoothK: int = 3,
-              smoothD: int = 3) -> tuple[pd.Series, pd.Series]:
+def stoch_rsi(close,
+              rsi_len=14,
+              stoch_len=14,
+              smoothK=3,
+              smoothD=3):
     """TradingView-ähnlicher StochRSI (K & D)."""
 
     close = pd.Series(close.astype(float))
@@ -46,7 +46,7 @@ def stoch_rsi(close: pd.Series,
     return K, D
 
 
-def detect_cross(df: pd.DataFrame) -> pd.DataFrame:
+def detect_cross(df):
     """Bull/Bear-Cross zwischen K und D finden."""
     bull = (df["K"].shift(1) < df["D"].shift(1)) & (df["K"] > df["D"])
     bear = (df["K"].shift(1) > df["D"].shift(1)) & (df["K"] < df["D"])
@@ -56,9 +56,9 @@ def detect_cross(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def run_backtest_filtered(df: pd.DataFrame,
-                          k_buy_level: float = 20,
-                          k_sell_level: float = 80):
+def run_backtest_filtered(df,
+                          k_buy_level=20,
+                          k_sell_level=80):
     """
     Strategie:
     - Bullish Cross wird NUR 'scharf', wenn er UNTER k_buy_level (z.B. 20) passiert.
@@ -72,7 +72,7 @@ def run_backtest_filtered(df: pd.DataFrame,
     start_capital = 10000.0
     cash = start_capital
     position = 0.0
-    trades: list[tuple[str, pd.Timestamp, float]] = []
+    trades = []
 
     buy_armed = False
     sell_armed = False
@@ -80,7 +80,7 @@ def run_backtest_filtered(df: pd.DataFrame,
     if df.empty:
         return None, None, trades
 
-    # Wir nutzen itertuples → jede Zeile ist ein NamedTuple, keine Series
+    # itertuples: jede Zeile = NamedTuple, kein Series-Geraffel
     for row in df.itertuples():
         price = float(row.close)
         K = float(row.K)
@@ -146,12 +146,18 @@ try:
     # StochRSI berechnen
     K, D = stoch_rsi(close)
 
-    # direkt mit Index einfügen → kein .values, kein Index-Chaos
-    df["K"] = K
-    df["D"] = D
+    # K & D sauber an df-Index ausrichten
+    df = df.join(pd.DataFrame({"K": K, "D": D}), how="left")
 
-    # Zeilen, wo StochRSI noch NaN ist, entfernen
-    df = df.dropna(subset=["close", "K", "D"])
+    # Sicherstellen, dass die Spalten existieren
+    required_cols = ["close", "K", "D"]
+    missing = [c for c in required_cols if c not in df.columns]
+    if missing:
+        st.error(f"❌ Fehlende Spalten: {missing}")
+        st.stop()
+
+    # Zeilen ohne gültige Werte verwerfen
+    df = df.dropna(subset=required_cols)
     if df.empty:
         st.error("⚠️ Zu wenige Daten für StochRSI-Berechnung.")
         st.stop()
