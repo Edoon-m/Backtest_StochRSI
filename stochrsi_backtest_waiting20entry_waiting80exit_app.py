@@ -4,7 +4,7 @@ import numpy as np
 import yfinance as yf
 import matplotlib.pyplot as plt
 
-st.set_page_config(page_title="StochRSI Crosses", layout="wide")
+st.set_page_config(page_title="StochRSI Signale", layout="wide")
 
 # ----------------- Hilfsfunktionen -----------------
 
@@ -46,7 +46,7 @@ def stoch_rsi(close,
     return K, D
 
 
-def detect_cross(df):
+def detect_cross(df: pd.DataFrame) -> pd.DataFrame:
     """Bull/Bear-Cross zwischen K und D finden."""
     bull = (df["K"].shift(1) < df["D"].shift(1)) & (df["K"] > df["D"])
     bear = (df["K"].shift(1) > df["D"].shift(1)) & (df["K"] < df["D"])
@@ -56,9 +56,9 @@ def detect_cross(df):
     return df
 
 
-def run_backtest_filtered(df,
-                          k_buy_level=20,
-                          k_sell_level=80):
+def run_backtest_filtered(df: pd.DataFrame,
+                          k_buy_level: float = 20,
+                          k_sell_level: float = 80):
     """
     Strategie:
     - Bullish Cross wird NUR 'scharf', wenn er UNTER k_buy_level (z.B. 20) passiert.
@@ -72,7 +72,7 @@ def run_backtest_filtered(df,
     start_capital = 10000.0
     cash = start_capital
     position = 0.0
-    trades = []
+    trades: list[tuple[str, pd.Timestamp, float]] = []
 
     buy_armed = False
     sell_armed = False
@@ -80,7 +80,7 @@ def run_backtest_filtered(df,
     if df.empty:
         return None, None, trades
 
-    # Jede Zeile als NamedTuple (kein Series-Geraffel)
+    # Jede Zeile als NamedTuple
     for row in df.itertuples():
         price = float(row.close)
         K = float(row.K)
@@ -115,9 +115,38 @@ def run_backtest_filtered(df,
     return final_value, perf, trades
 
 
+def fix_yf_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Repariert ALLE yfinance-Formate:
+    - MultiIndex-Spalten
+    - doppelte Ticker-Spalten (z.B. ['btc-usd', ...])
+    - normalisiert auf ['open','high','low','close','adj close','volume'] oder ähnlich
+    """
+
+    # Fall 1: MultiIndex → nimm die innere Ebene
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(-1)
+
+    cols = [str(c).lower() for c in df.columns]
+
+    # Fall 2: alle Spalten identisch (nur Ticker-Name)
+    if len(set(cols)) == 1:
+        # Versuche anhand der Spaltenanzahl OHLCV zuzuweisen
+        if df.shape[1] >= 6:
+            df.columns = ["open", "high", "low", "close", "adj close", "volume"]
+        elif df.shape[1] == 5:
+            df.columns = ["open", "high", "low", "close", "volume"]
+        else:
+            raise ValueError(f"Unbekanntes Spaltenformat von yfinance: {df.columns}")
+    else:
+        df.columns = cols
+
+    return df
+
+
 # ----------------- UI -----------------
 
-st.title("📉 StochRSI Crosses – gefilterte Buy/Sell Signale")
+st.title("📉 StochRSI Signale – gefilterte Cross-Strategie")
 
 symbol = st.text_input("Symbol", "BTC-USD")
 interval = st.selectbox("Intervall", ["1h", "4h", "1d", "1wk"], index=2)
@@ -139,18 +168,11 @@ try:
         st.error("⚠️ Für dieses Symbol/Intervall konnten keine Daten geladen werden.")
         st.stop()
 
-    # ---- MultiIndex-Fix für Spalten ----
-    # yfinance liefert manchmal MultiIndex-Spalten (Ticker + Feld)
     df = df.copy()
-    if isinstance(df.columns, pd.MultiIndex):
-        # Nimm die innerste Ebene (Open/High/Low/Close/Adj Close/Volume)
-        df.columns = df.columns.get_level_values(-1)
-
-    # Spaltennamen vereinheitlichen
-    df.columns = [str(c).lower() for c in df.columns]
+    df = fix_yf_columns(df)
 
     if "close" not in df.columns:
-        st.error(f"❌ Keine 'close'-Spalte gefunden. Spalten: {list(df.columns)}")
+        st.error(f"❌ Keine 'close'-Spalte gefunden. Spalten nach Fix: {list(df.columns)}")
         st.stop()
 
     close = df["close"]
@@ -158,22 +180,19 @@ try:
         close = close.iloc[:, 0]
 
     # --------------------------------------------------
-    # StochRSI berechnen und an df-Index ausrichten
+    # StochRSI berechnen und andocken
     # --------------------------------------------------
     K, D = stoch_rsi(close)
 
-    # K & D sicher an df anhängen (kein MultiIndex-Merge)
     kd_df = pd.DataFrame({"K": K, "D": D})
     df = df.join(kd_df, how="left")
 
-    # Sicherstellen, dass Spalten existieren
     required_cols = ["close", "K", "D"]
     missing = [c for c in required_cols if c not in df.columns]
     if missing:
         st.error(f"❌ Fehlende Spalten nach Join: {missing}")
         st.stop()
 
-    # Zeilen ohne gültige Werte verwerfen
     df = df.dropna(subset=required_cols)
     if df.empty:
         st.error("⚠️ Zu wenige Daten für StochRSI-Berechnung.")
@@ -191,7 +210,7 @@ try:
     )
 
     # --------------------------------------------------
-    # Plot: Kurs + tatsächliche Trades
+    # Plot: Kurs + Trades
     # --------------------------------------------------
     fig, ax = plt.subplots(figsize=(12, 5))
     ax.plot(df.index, df["close"], label="Kurs")
@@ -202,11 +221,11 @@ try:
     if buy_dates:
         ax.scatter(buy_dates,
                    df.loc[buy_dates, "close"],
-                   color="green", marker="^", s=80, label="Buy")
+                   marker="^", s=80, label="Buy")
     if sell_dates:
         ax.scatter(sell_dates,
                    df.loc[sell_dates, "close"],
-                   color="red", marker="v", s=80, label="Sell")
+                   marker="v", s=80, label="Sell")
 
     ax.legend()
     ax.set_title(f"{symbol} – gefilterte StochRSI-Trades ({interval})")
