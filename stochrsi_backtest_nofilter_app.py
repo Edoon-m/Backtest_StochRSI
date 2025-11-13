@@ -4,16 +4,21 @@ import numpy as np
 import yfinance as yf
 import matplotlib.pyplot as plt
 
-st.set_page_config(page_title="TradingView StochRSI – Buy/Sell", layout="wide")
+st.set_page_config(page_title="TradingView StochRSI – Buy/Sell bei jedem Cross", layout="wide")
 
 # ---------------------------------------------------------
-# TradingView Wilder RSI + StochRSI
+# TradingView RMS-based RSI (Wilder)
 # ---------------------------------------------------------
-def rma(series: pd.Series, length: int) -> pd.Series:
+def rma(series, length):
     return series.ewm(alpha=1/length, adjust=False).mean()
 
+# ---------------------------------------------------------
+# TradingView-kompatibler StochRSI
+# ---------------------------------------------------------
 def stoch_rsi_tv(close, rsi_len=14, stoch_len=14, k=3, d=3):
-    close = close.astype(float)
+
+    close = pd.Series(close).astype(float)
+
     delta = close.diff()
 
     up = delta.clip(lower=0)
@@ -36,43 +41,54 @@ def stoch_rsi_tv(close, rsi_len=14, stoch_len=14, k=3, d=3):
     return K, D
 
 # ---------------------------------------------------------
-# Cross Signale
+# Cross-Detection
 # ---------------------------------------------------------
 def detect_crosses(df):
-    df["bull_cross"] = (df["K"].shift(1) < df["D"].shift(1)) & (df["K"] > df["D"])
-    df["bear_cross"] = (df["K"].shift(1) > df["D"].shift(1)) & (df["K"] < df["D"])
+    # Alle Werte explizit in boolean casten
+    bull = (df["K"].shift(1) < df["D"].shift(1)) & (df["K"] > df["D"])
+    bear = (df["K"].shift(1) > df["D"].shift(1)) & (df["K"] < df["D"])
+
+    df["bull_cross"] = bull.astype(bool)
+    df["bear_cross"] = bear.astype(bool)
+
     return df
 
 # ---------------------------------------------------------
 # Backtest
 # ---------------------------------------------------------
 def run_backtest(df):
+
     cash = 10000
     position = 0
     trades = []
 
     for i in range(len(df)):
-        price = df["close"].iloc[i]
-        row = df.iloc[i]
+        price = float(df["close"].iloc[i])
+        buy_signal = bool(df["bull_cross"].iloc[i])
+        sell_signal = bool(df["bear_cross"].iloc[i])
 
-        if bool(row["bull_cross"]) and cash > 0:
+        if buy_signal and cash > 0:
             position = cash / price
             cash = 0
             trades.append(("BUY", df.index[i], price))
 
-        if bool(row["bear_cross"]) and position > 0:
+        if sell_signal and position > 0:
             cash = position * price
             position = 0
             trades.append(("SELL", df.index[i], price))
 
-    final_value = cash + position * df["close"].iloc[-1]
+    final_value = cash + position * float(df["close"].iloc[-1])
     gain = (final_value / 10000 - 1) * 100
+
     return final_value, gain, trades
 
+# ---------------------------------------------------------
+# UI
 # ---------------------------------------------------------
 st.title("📊 TradingView-StochRSI – Buy/Sell bei jedem Cross")
 
 col1, col2, col3 = st.columns(3)
+
 with col1:
     symbol = st.text_input("Symbol (BTC-USD, ETH-USD, AAPL, ISWD.L ...)", "BTC-USD")
 with col2:
@@ -88,13 +104,12 @@ try:
         st.error("Keine Daten geladen!")
         st.stop()
 
-    # Close-Spalte sicherstellen
     close = df["close"]
     if isinstance(close, pd.DataFrame):
         close = close.iloc[:, 0]
+
     close = close.astype(float)
 
-    # TradingView StochRSI
     K, D = stoch_rsi_tv(close)
     df["K"] = K.values
     df["D"] = D.values
@@ -102,22 +117,18 @@ try:
     df = df.dropna()
     df = detect_crosses(df)
 
-    # Backtest
     final_value, perf, trades = run_backtest(df)
 
-    # Chart
     fig, ax = plt.subplots(figsize=(12,5))
     ax.plot(df.index, df["close"], label="Kurs")
-    ax.scatter(df.index[df["bull_cross"]], df["close"][df["bull_cross"]],
-               marker="^", color="green", s=80, label="Buy")
-    ax.scatter(df.index[df["bear_cross"]], df["close"][df["bear_cross"]],
-               marker="v", color="red", s=80, label="Sell")
+    ax.scatter(df.index[df["bull_cross"]], df["close"][df["bull_cross"]], marker="^", color="green", s=80)
+    ax.scatter(df.index[df["bear_cross"]], df["close"][df["bear_cross"]], marker="v", color="red", s=80)
     ax.legend()
     st.pyplot(fig)
 
     st.success(f"💰 Endwert: **{final_value:,.2f} USD** | Gewinn: **{perf:.2f}%**")
 
-    if trades:
+    if len(trades) > 0:
         st.dataframe(pd.DataFrame(trades, columns=["Typ", "Datum", "Preis"]).set_index("Datum"))
     else:
         st.info("Keine Signale gefunden.")
